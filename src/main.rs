@@ -1,12 +1,16 @@
 mod args;
 use args::Args;
-use image::{io::Reader, DynamicImage, ImageFormat, imageops::FilterType::Triangle, GenericImageView};
-use std::{io::BufReader, fs::File};
+use image::{io::Reader, DynamicImage, ImageFormat, imageops::FilterType::Triangle, GenericImageView, ImageError};
 use std::convert::TryInto;
 
 #[derive(Debug)]
 enum ImageDataErrors {
     DifferentImageFormats,
+    BufferTooSmall,
+    UnableToReadImageFromPath(std::io::Error),
+    UnableToFormatImage(String),
+    UnableToDecodeImage(ImageError),
+    UnableToSaveImage(ImageError)
 }
 
 struct FloatingImage {
@@ -27,27 +31,52 @@ impl FloatingImage {
             name
         }
     }
+
+    fn set_data(&mut self, data: Vec<u8>) -> Result<(), ImageDataErrors> {
+        if data.len() > self.data.capacity() {
+            return Err(ImageDataErrors::BufferTooSmall);
+        }
+        self.data = data;
+        Ok(())
+    }
 }
 
 fn main() -> Result<(), ImageDataErrors> {
     let args = Args::new();
-    let (image_1, image_format_1) = find_image_from_path(args.image_1);
-    let (image_2, image_format_2) = find_image_from_path(args.image_2);
+    let (image_1, image_format_1) = find_image_from_path(args.image_1)?;
+    let (image_2, image_format_2) = find_image_from_path(args.image_2)?;
 
     if image_format_1 != image_format_2 {
         return Err(ImageDataErrors::DifferentImageFormats);
     }
 
     let (image_1, image_2) = standardize_size(image_1, image_2);
-    let output = FloatingImage::new(image_1.width(), image_1.height(), args.output);
-    Ok(())
+    let mut output = FloatingImage::new(image_1.width(), image_1.height(), args.output);
+    
+    let combined_data = combine_images(image_1, image_2);
+    output.set_data(combined_data)?;
+
+    if let Err(e) = image::save_buffer_with_format(output.name, &output.data, output.width,output.height, image::ColorType::Rgba8, image_format_1) {
+        Err(ImageDataErrors::UnableToSaveImage(e))
+    } else {
+        Ok(())
+    }
 }
 
-fn find_image_from_path(path: String) -> (DynamicImage, ImageFormat) {
-    let image_reader: Reader<BufReader<File>> = Reader::open(path).unwrap();
-    let image_format: ImageFormat = image_reader.format().unwrap();
-    let image: DynamicImage = image_reader.decode().unwrap();
-    (image, image_format)
+fn find_image_from_path(path: String) -> Result<(DynamicImage, ImageFormat), ImageDataErrors> {
+    match Reader::open(&path) {
+        Ok(image_reader) => {
+            if let Some(image_format) = image_reader.format() {
+            match image_reader.decode() {
+                Ok(image) => Ok((image, image_format)),
+                Err(e) => Err(ImageDataErrors::UnableToDecodeImage(e))
+            }
+            } else {
+                return Err(ImageDataErrors::UnableToFormatImage(path));
+            }
+        },
+        Err(e) => Err(ImageDataErrors::UnableToReadImageFromPath(e))
+    }
 }
 
 fn get_smallest_dimensions(dim_1: (u32, u32), dim_2: (u32, u32)) -> (u32, u32) {
@@ -75,36 +104,28 @@ fn combine_images(image_1: DynamicImage, image_2: DynamicImage) -> Vec<u8> {
 }
 
 fn alternate_pixels(vec_1: Vec<u8>, vec_2: Vec<u8>) -> Vec<u8> {
-    
-}
+    let mut combined_data = vec![0u8; vec_1.len()];
 
-/*use std::env::{args, Args};
-
-fn main() {
-    let mut args: Args = args();
-
-    let first = args.nth(1).unwrap();
-    let operator = args.nth(0).unwrap().chars().next().unwrap();
-    let second = args.nth(0).unwrap();
-
-    let first_number = first.parse::<f32>().unwrap();
-    let second_number = second.parse::<f32>().unwrap();
-    let result = operate(operator, first_number, second_number);
-
-    println!("{:?}", output(first_number, operator, second_number, result));
-}
-
-
-fn operate(operator: char, first_number: f32, second_number: f32) -> f32 {
-    match operator {
-        '+' => first_number + second_number,
-        '-' => first_number - second_number,
-        '/' => first_number / second_number,
-        '*' | 'x' | 'X' => first_number * second_number,
-        _ => panic!("Invalid operator used.")
+    let mut i = 0;
+    while i < vec_1.len() {
+        if i % 8 == 0 {
+            combined_data.splice(i..=i + 3, set_rgba(&vec_1, i, i + 3));
+        } else {
+            combined_data.splice(i..=i + 3, set_rgba(&vec_2, i, i + 3));
+        }
+        i += 4;
     }
+    combined_data
 }
 
-fn output(first_number: f32, operator: char, second_number: f32, result: f32) -> String {
-    format!("{} {} {} = {}", first_number, operator, second_number, result)
-}*/
+fn set_rgba(vec: &Vec<u8>, start: usize, end: usize) -> Vec<u8> {
+    let mut rgba = Vec::new();
+    for i in start..=end {
+        let val: u8 = match vec.get(i) {
+            Some(d) => *d,
+            None => panic!("Index out of bounds")
+        };
+        rgba.push(val);
+    }
+    rgba
+}
